@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+/archive
+src/data/hardware/tpu_gpus.csv
+src/data/hardware/tpu_cpus.csv

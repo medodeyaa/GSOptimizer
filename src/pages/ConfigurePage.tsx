@@ -2,6 +2,7 @@ import type { Resolution, TargetFPS, RAMType } from "../data/types";
 import { GPU_CATALOG } from "../data/hardware/gpu";
 import { CPU_CATALOG } from "../data/hardware/cpu";
 import { GAME_CATALOG } from "../data/games/index";
+import { FULL_GPU_CATALOG, FULL_CPU_CATALOG } from "../data/hardware/fullCatalog";
 import {
   useActions,
   useSelectedGPU,
@@ -18,20 +19,21 @@ import {
   SectionLabel,
   Badge,
   HardwareTierBadge,
-  DropdownSelect,
+  HardwareSearchSelect,
   TabGroup,
 } from "../components/ui/index";
 import type { SelectOption } from "../components/ui/index";
 
-// ─── Option builders ──────────────────────────────────────────────────────────
-
-const GPU_OPTIONS: SelectOption[] = GPU_CATALOG.map((g) => ({
+// All GPU/CPU options come from the FULL merged catalog (CSV + hand-tuned).
+// The search bar shows every valid entry; the optimization engine uses hand-tuned
+// scores for known cards and estimated scores for CSV-only entries.
+const GPU_OPTIONS: SelectOption[] = FULL_GPU_CATALOG.map((g) => ({
   value: g.id,
   label: g.label,
   group: `${g.brand.toUpperCase()} — ${g.architecture.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`,
 }));
 
-const CPU_OPTIONS: SelectOption[] = CPU_CATALOG.map((c) => ({
+const CPU_OPTIONS: SelectOption[] = FULL_CPU_CATALOG.map((c) => ({
   value: c.id,
   label: c.label,
   group: c.brand === "intel" ? "Intel" : "AMD",
@@ -110,14 +112,19 @@ export function ConfigurePage({ onAnalyze }: ConfigurePageProps) {
           {/* GPU */}
           <Card className="p-5">
             <SectionLabel>Graphics Card</SectionLabel>
-            <DropdownSelect
+            <HardwareSearchSelect
               options={GPU_OPTIONS}
               value={selectedGPU?.id ?? null}
               onChange={(id) => {
-                const gpu = GPU_CATALOG.find((g) => g.id === id) ?? null;
-                setGPU(gpu);
+                // First try the hand-tuned catalog (accurate engine scores)
+                const gpu =
+                  GPU_CATALOG.find((g) => g.id === id) ??
+                  FULL_GPU_CATALOG.find((g) => g.id === id) ??
+                  null;
+                setGPU(gpu ?? null);
               }}
-              placeholder="Select your GPU…"
+              placeholder="Search your GPU…"
+              icon="gpu"
             />
             {selectedGPU && (
               <div className="flex items-center gap-2 mt-3">
@@ -133,14 +140,19 @@ export function ConfigurePage({ onAnalyze }: ConfigurePageProps) {
           {/* CPU */}
           <Card className="p-5">
             <SectionLabel>Processor</SectionLabel>
-            <DropdownSelect
+            <HardwareSearchSelect
               options={CPU_OPTIONS}
               value={selectedCPU?.id ?? null}
               onChange={(id) => {
-                const cpu = CPU_CATALOG.find((c) => c.id === id) ?? null;
-                setCPU(cpu);
+                // First try the hand-tuned catalog (accurate engine scores)
+                const cpu =
+                  CPU_CATALOG.find((c) => c.id === id) ??
+                  FULL_CPU_CATALOG.find((c) => c.id === id) ??
+                  null;
+                setCPU(cpu ?? null);
               }}
-              placeholder="Select your CPU…"
+              placeholder="Search your CPU…"
+              icon="cpu"
             />
             {selectedCPU && (
               <div className="flex items-center gap-2 mt-3">

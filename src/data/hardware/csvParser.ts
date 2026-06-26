@@ -195,6 +195,22 @@ function gpuArchitecture(name: string, chip: string, year: number): string {
   return "other";
 }
 
+/**
+ * Compression exponent applied to the raw TFLOPS ratio.
+ *
+ * Real gaming FPS does NOT scale linearly with TFLOPS: an RTX 4090 has ~24× the
+ * raw compute of a GTX 1650 Ti but is only ~4–8× faster in actual 1080p games
+ * (CPU/engine/bandwidth limits cap the gap). A pure-linear model therefore
+ * crushes every budget/older card toward 0 (a 1650 Ti scored ~3, implying it is
+ * 3 % of a 4090 — it predicted ~7 FPS in titles it really runs at 150 +).
+ *
+ * Raising the ratio to GAMMA (< 1) compresses the curve so mid/low cards land in
+ * a realistic band. Calibrated so CSV scores match the hand-tuned catalog
+ * anchors (RTX 4090 = 100, 4070 ≈ 67, 4060 ≈ 50, 3060 ≈ 48, GTX 1650 ≈ 22,
+ * 1060 6 GB ≈ 24) — see calibration notes in the PR.
+ */
+const GPU_SCORE_GAMMA = 0.40;
+
 /** Estimate GPU compute_score. RTX 4090 (16384 shaders × 2235 MHz) ≈ 100. */
 function computeGPUScore(
   shaders: number,
@@ -217,8 +233,11 @@ function computeGPUScore(
   const REF_TFLOPS = (16384 * 2235 * 2) / 1e9;
   const rawRatio = tflops / REF_TFLOPS; // 0–∞, RTX 4090 ≈ 1.0
 
+  // Generation-adjusted effective ratio (architecture/driver maturity), then
+  // gamma-compressed so FPS-relative scaling — not raw TFLOPS — drives the score.
   const eff = gpuGenEfficiency(year);
-  let score = rawRatio * eff * 100;
+  const effRatio = rawRatio * eff; // RTX 4090 ≈ 1.0
+  let score = Math.pow(effRatio, GPU_SCORE_GAMMA) * 100;
 
   // Small VRAM bonus (high VRAM → can sustain high settings)
   if (vramMB >= 32768) score += 6;
@@ -294,38 +313,96 @@ function parseCPUClock(s: string): { base: number; boost: number } {
 }
 
 /**
- * Classify CPU tier from its model name.
+ * Compute game_score (0–100), calibrated to the hand-tuned catalog scale.
  *
- * flagship : EPYC, Threadripper PRO, i9, Ryzen 9, Xeon Platinum/Gold
- * mid      : i7, Ryzen 7, i5 (≥6 cores), Xeon Silver/Bronze, FX-8/9xxx
- * entry    : i3, Ryzen 3/5 low, Celeron, Pentium, Athlon, Sempron, older Xeon E
+ * The previous formula (ipc×8 + boost×6 + cores×2.5) saturated almost every
+ * modern CPU near 90–100 (a 6-core i5-10400F computed ~97 where the hand-tuned
+ * catalog rates it 56). This weighting reproduces the hand-tuned anchors within
+ * a few points: i5-10400F ≈ 59 (hand 56), i9-10900K ≈ 71 (73), i9-12900K ≈ 89
+ * (91), Ryzen 9 5950X ≈ 94 (89), i5-10300H ≈ 55.
  */
-function cpuTierLabel(name: string): "flagship" | "mid" | "entry" {
-  const n = name.toLowerCase();
-  if (/epyc|threadripper|xeon platinum|xeon gold|i9-|ryzen 9|ryzen threadripper|knights/.test(n))
-    return "flagship";
-  if (/i7-|ryzen 7|xeon silver|xeon w-|xeon e5-2[6-9]|xeon e5-26|xeon e5-46|xeon e7|fx-[89]|core 2 extreme|phenom ii x6/.test(n))
-    return "mid";
-  if (/i5-|ryzen 5|fx-[0-6]|phenom ii x[34]|phenom x[34]|athlon ii x[34]|core 2 quad|xeon e3|xeon e5-1[0-9]/.test(n))
-    return "mid";
-  return "entry";
-}
-
-/** Compute game_score using catalog formula. */
 function cpuGameScore(ipcTier: number, boostGhz: number, coresPhys: number): number {
-  return clamp(Math.round(ipcTier * 8 + boostGhz * 6 + coresPhys * 2.5), 1, 100);
+  return clamp(Math.round(ipcTier * 6 + coresPhys * 2.2 + boostGhz * 3.5 - 12), 1, 100);
 }
 
-// ─── GPU tier helper (derived from score) ────────────────────────────────────
+// ─── Name-based spec inference (for rows missing clock/core/node data) ─────────
+//
+// ~380 rows in the archive CSV carry only a model name (a scrape gap), e.g. the
+// entire 10th-gen Intel mobile block including "Core i5-10300H". Without this,
+// they fell back to placeholder defaults (1 core / 3.0 GHz / IPC 5) and scored
+// nonsensically. We instead derive realistic cores/boost/node from the model
+// name so the engine produces sane numbers.
 
-function gpuTierLabel(score: number, name: string): "flagship" | "mid" | "entry" {
+interface InferredSpecs { physical: number; logical: number; boost: number; nm: string; }
+
+/** Intel Core generation → fabrication node (nm), used to derive IPC tier. */
+function intelGenNode(gen: number): number {
+  if (gen >= 11) return 10;          // Intel 7 (10nm ESF) / 10nm SuperFin — 11th-14th
+  if (gen >= 6 && gen <= 10) return 14; // Skylake … Comet Lake
+  if (gen === 5) return 14;          // Broadwell
+  if (gen === 4 || gen === 3) return 22; // Haswell / Ivy Bridge
+  return 32;                          // Sandy Bridge and older
+}
+
+/** Best-effort cores/boost/node from a CPU model name. */
+function inferCPUSpecs(name: string): InferredSpecs {
   const n = name.toLowerCase();
-  // Explicit flagship keywords regardless of score (workstation / high-end server)
-  if (/titan|quadro rtx [4-8]|rtx a[456]|3090|7900 xtx|7900 xt$|6900|rx vega 64|vega frontier|6800 xt|instinct|tesla v100|tesla a100|h100|h800|a100|a40|a30|l40/.test(n))
-    return "flagship";
-  if (score >= 68) return "flagship";
-  if (score >= 26) return "mid";
-  return "entry";
+
+  // ── Intel Core iX-NNNN[suffix] ───────────────────────────────────────────────
+  let m = n.match(/core\s+i([3579])[- ](\d{3,5})([a-z]*)/);
+  if (m) {
+    const tier = parseInt(m[1], 10);            // 3 / 5 / 7 / 9
+    const num = m[2];                            // e.g. "10300"
+    const suf = m[3] || "";
+    const gen = num.length >= 5 ? parseInt(num.slice(0, 2), 10) : parseInt(num.slice(0, 1), 10);
+    const nm = intelGenNode(gen);
+    const ulv = /[uy]/.test(suf);                // thin-and-light mobile
+    const mob = /h/.test(suf);                   // performance mobile
+
+    let cores: number;
+    if (ulv) cores = tier <= 3 ? 2 : 4;
+    else if (gen >= 12) cores = tier === 3 ? 4 : tier === 5 ? 6 : 8; // hybrid: P-core count
+    else if (tier === 3) cores = 4;
+    else if (tier === 5) cores = mob && gen <= 10 ? 4 : gen <= 7 ? 4 : 6;
+    else if (tier === 7) cores = mob ? (gen <= 8 ? 4 : 6) : gen <= 7 ? 4 : 8;
+    else cores = 8;                              // i9
+
+    let boost: number;
+    if (ulv) boost = tier <= 3 ? 3.4 : 3.9;
+    else if (mob) boost = tier <= 5 ? 4.5 : tier === 7 ? 5.0 : 5.2;
+    else boost = tier === 3 ? 4.3 : tier === 5 ? (gen >= 12 ? 4.9 : 4.4)
+               : tier === 7 ? (gen >= 12 ? 5.1 : 4.8) : 5.4;
+    if (gen <= 8) boost -= 0.3;                  // older silicon clocked lower
+
+    return { physical: cores, logical: cores * 2, boost: Math.round(boost * 10) / 10, nm: String(nm) };
+  }
+
+  if (/core m-/.test(n)) return { physical: 2, logical: 4, boost: 2.6, nm: "14" };
+  if (/pentium/.test(n)) return { physical: 2, logical: /g4|g5|g6|gold/.test(n) ? 4 : 2, boost: 3.5, nm: "14" };
+  if (/celeron/.test(n)) return { physical: 2, logical: 2, boost: /n2|n3|n4/.test(n) ? 2.4 : 3.0, nm: "14" };
+  if (/atom/.test(n))    return { physical: 4, logical: 4, boost: 1.8, nm: "14" };
+
+  // ── AMD Ryzen X NNNN ─────────────────────────────────────────────────────────
+  m = n.match(/ryzen\s+([3579])\s+(\d{4})/);
+  if (m) {
+    const tier = parseInt(m[1], 10);
+    const series = parseInt(m[2][0], 10);        // 1/2/3/5/7/9 thousands
+    const nm = series >= 9 ? 4 : series >= 7 ? 5 : series >= 3 ? 7 : 14;
+    const cores = tier === 3 ? 4 : tier === 5 ? 6 : tier === 7 ? 8 : 12;
+    let boost = tier === 3 ? 4.0 : tier === 5 ? 4.4 : tier === 7 ? 4.7 : 4.9;
+    if (series >= 7) boost += 0.4;
+    else if (series <= 2) boost -= 0.3;
+    return { physical: cores, logical: cores * 2, boost: Math.round(boost * 10) / 10, nm: String(nm) };
+  }
+
+  // ── AMD APU / Athlon / FX ─────────────────────────────────────────────────────
+  if (/\ba(4|6)\b|a4-|a6-/.test(n))            return { physical: 2, logical: 2, boost: 3.5, nm: "28" };
+  if (/\ba(8|10|12)\b|a8-|a10-|a12-/.test(n))  return { physical: 4, logical: 4, boost: 3.8, nm: "28" };
+  if (/athlon/.test(n))                         return { physical: /x4|3000|300ge/.test(n) ? 4 : 2, logical: 4, boost: 3.4, nm: "14" };
+  if (/fx-/.test(n))                            return { physical: /fx-[89]/.test(n) ? 8 : /fx-6/.test(n) ? 6 : 4, logical: 8, boost: 4.0, nm: "32" };
+
+  // ── Generic fallback (unknown family) ─────────────────────────────────────────
+  return { physical: 4, logical: 4, boost: 3.2, nm: "14" };
 }
 
 // ─── Main export: parse CPUs ─────────────────────────────────────────────────
@@ -351,11 +428,26 @@ export function parseCPUsFromCSV(): CPU[] {
     if (seenLabel.has(key)) continue;
     seenLabel.add(key);
 
-    const { physical, logical } = parseCores(f[3] ?? "1");
-    const { base, boost }       = parseCPUClock(f[4] ?? "2 GHz");
-    const ipcTier               = ipcFromNode(f[6] ?? "14 nm");
-    const brand                 = detectCPUBrand(name);
-    const gameScore             = cpuGameScore(ipcTier, boost, physical);
+    // Many archive rows carry only a model name (scrape gap). When the core/clock
+    // columns are blank, derive realistic specs from the name instead of falling
+    // back to the placeholder defaults that produced nonsensical scores.
+    const hasSpecs = !!(f[3]?.trim() && f[4]?.trim());
+
+    let physical: number, logical: number, base: number, boost: number, nodeStr: string;
+    if (hasSpecs) {
+      ({ physical, logical } = parseCores(f[3] ?? "1"));
+      ({ base, boost }       = parseCPUClock(f[4] ?? "2 GHz"));
+      nodeStr                = f[6]?.trim() || "14 nm";
+    } else {
+      const g = inferCPUSpecs(name);
+      physical = g.physical; logical = g.logical;
+      base = Math.round((g.boost - 0.5) * 10) / 10; boost = g.boost;
+      nodeStr = g.nm;
+    }
+
+    const ipcTier   = ipcFromNode(nodeStr);
+    const brand     = detectCPUBrand(name);
+    const gameScore = cpuGameScore(ipcTier, boost, physical);
 
     out.push({
       id:              toId(name, seenId),

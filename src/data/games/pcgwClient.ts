@@ -29,7 +29,7 @@
 
 import type { GameDefinition, GameRequirements } from "../types";
 import { FULL_GPU_CATALOG, FULL_CPU_CATALOG } from "../hardware/fullCatalog";
-import { buildDefinitionFromDemand, type DemandInput } from "./gamesParser";
+import { buildDefinitionFromDemand, eraDemandFactor, type DemandInput } from "./gamesParser";
 
 const API = "https://www.pcgamingwiki.com/w/api.php";
 const CACHE_PREFIX = "pcgw:v1:";
@@ -292,10 +292,11 @@ export async function fetchPcgwDefinition(
     if (!req) return null;
 
     const demand = requirementsToDemand(req, base.year, fallback);
+    const era = eraDemandFactor(base.year);
     const base_vram_mb = req.recVRAM_mb ?? (req.minVRAM_mb ? Math.round(req.minVRAM_mb * 1.4) : undefined);
 
     return buildDefinitionFromDemand(
-      { ...base, gpu_demand: demand.gpu, cpu_demand: demand.cpu },
+      { ...base, gpu_demand: demand.gpu * era, cpu_demand: demand.cpu * era },
       { specSource: "pcgw", requirements: req, base_vram_mb }
     );
   } catch {

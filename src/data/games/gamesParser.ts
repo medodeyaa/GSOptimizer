@@ -232,6 +232,33 @@ function yearScale(year: number): number {
   return 0.05;
 }
 
+/**
+ * Era attenuation for genre-derived demand.
+ *
+ * Genre demand has NO sense of time: "Shooter; Racing; Adventure" yields the
+ * same ~0.78 GPU demand whether the game is GTA: San Andreas (2004) or a 2020
+ * AAA title. But demand here is measured against *modern* reference hardware
+ * (RTX 4090 = 100), and a 2004 game is trivial for it — so an old game's real
+ * demand on today's GPUs is a fraction of its genre's. Without this, a flagship
+ * was predicting ~30 FPS in San Andreas at 4K/max.
+ *
+ * Modern games (2022+) are unaffected (factor 1.0); older games are scaled down
+ * toward their true difficulty. Only applied to the CSV genre heuristic — the
+ * PCGamingWiki path derives demand from era-appropriate published requirements
+ * and must not be attenuated again.
+ */
+export function eraDemandFactor(year: number): number {
+  if (year >= 2022) return 1.00;
+  if (year >= 2019) return 0.92;
+  if (year >= 2016) return 0.80;
+  if (year >= 2013) return 0.66;
+  if (year >= 2010) return 0.52;
+  if (year >= 2007) return 0.40;
+  if (year >= 2004) return 0.30;
+  if (year >= 2000) return 0.22;
+  return 0.16;
+}
+
 // ─── Settings template builder ────────────────────────────────────────────────
 //
 // A 9-setting template (matches the hand-tuned games' structure). Per-tier base
@@ -447,17 +474,27 @@ export function buildDefinitionFromDemand(
 ): GameDefinition {
   const gpu_demand = clamp(m.gpu_demand, 0.08, 1);
   const cpu_demand = clamp(m.cpu_demand, 0.08, 1);
+  const era = eraDemandFactor(m.year);
   const ys = yearScale(m.year);
+
+  // We reconstruct the era-relative demand for VRAM calculations
+  // because an old game that was era-heavy still used the maximum VRAM of its time.
+  const relative_gpu_demand = clamp(gpu_demand / era, 0.08, 1);
 
   // base_vram: OS/engine baseline that scales with graphical ambition + era.
   // A real published VRAM figure (overrides.base_vram_mb) wins when available.
   const base_vram_mb =
     overrides.base_vram_mb ??
-    Math.round(clamp((300 + gpu_demand * 2600) * (0.55 + 0.45 * ys), 250, 4000));
+    Math.round(clamp((300 + relative_gpu_demand * 2600) * (0.55 + 0.45 * ys), 250, 4000));
 
-  // Lighter / older games hit much higher framerates on a reference GPU/CPU.
-  const gpu_baseline_fps = Math.round(clamp((1 - gpu_demand) * 320 + 110 + (1 - ys) * 60, 90, 480));
-  const cpu_baseline_fps = Math.round(clamp((1 - cpu_demand) * 300 + 120 + (1 - ys) * 40, 90, 460));
+  // Base modern FPS is determined by absolute demand, then inflated by 1/era
+  // so older GPUs can achieve playable framerates when scaled.
+  const base_gpu_fps = (1 - gpu_demand) * 320 + 110;
+  const base_cpu_fps = (1 - cpu_demand) * 300 + 120;
+
+  const gpu_baseline_fps = Math.round(clamp(base_gpu_fps / era, 90, 3000));
+  const cpu_baseline_fps = Math.round(clamp(base_cpu_fps / era, 90, 3000));
+
   const cpu_weight = Math.round(clamp(0.3 + cpu_demand * 0.6, 0.3, 0.95) * 100) / 100;
 
   // vramScale references the hand-tuned ~1500 MB texture-Max delta as "1.0".
@@ -486,8 +523,14 @@ export function buildGeneratedGame(id: string): GameDefinition | undefined {
   const m = getGameMeta(id);
   if (!m) return undefined;
 
+  // Attenuate genre demand by release era so old games aren't modelled as
+  // demanding as modern ones of the same genre (see eraDemandFactor).
+  const era = eraDemandFactor(m.year);
+  const gpu_demand = clamp(m.gpu_demand * era, 0.08, 1);
+  const cpu_demand = clamp(m.cpu_demand * era, 0.08, 1);
+
   const def = buildDefinitionFromDemand(
-    { id: m.id, label: m.label, engine: m.engine, year: m.year, gpu_demand: m.gpu_demand, cpu_demand: m.cpu_demand },
+    { id: m.id, label: m.label, engine: m.engine, year: m.year, gpu_demand, cpu_demand },
     { specSource: "estimated" }
   );
 

@@ -34,16 +34,17 @@ describe("GPU catalog", () => {
     expect(GPU_CATALOG.length).toBeGreaterThanOrEqual(20);
   });
 
-  it("every entry has a positive compute_score between 0 and 100", () => {
+  it("every entry has a sane compute_score (anchor RTX 4090 = 100)", () => {
+    // Scores are normalized against the RTX 4090 = 100 anchor, which is not a
+    // hard cap: newer flagships (RTX 50 series) legitimately exceed 100.
     for (const gpu of GPU_CATALOG) {
       expect(gpu.compute_score).toBeGreaterThan(0);
-      expect(gpu.compute_score).toBeLessThanOrEqual(100);
+      expect(gpu.compute_score).toBeLessThanOrEqual(200);
     }
   });
 
-  it("RTX 4090 has the highest compute_score", () => {
-    const max = Math.max(...GPU_CATALOG.map((g) => g.compute_score));
-    expect(RTX_4090.compute_score).toBe(max);
+  it("RTX 4090 is the 100 anchor", () => {
+    expect(RTX_4090.compute_score).toBe(100);
   });
 
   it("all VRAM values are positive multiples of 1024", () => {

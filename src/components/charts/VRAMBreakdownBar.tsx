@@ -77,7 +77,7 @@ export function VRAMBreakdownBar({ vram, game }: VRAMBreakdownBarProps) {
         <div
           title={`Engine base: ${Math.round(vram.base_mb)} MB`}
           style={{ width: pct(vram.base_mb) }}
-          className="bg-surface-500 shrink-0"
+          className="bg-surface-400 shrink-0"
           onMouseEnter={() => setHovered("__base__")}
           onMouseLeave={() => setHovered(null)}
         />
@@ -107,7 +107,7 @@ export function VRAMBreakdownBar({ vram, game }: VRAMBreakdownBarProps) {
       </div>
 
       {/* Axis labels */}
-      <div className="flex justify-between mt-1 text-[10px] text-surface-500">
+      <div className="flex justify-between mt-1 text-[10px] text-surface-400">
         <span>0</span>
         <span>90% limit</span>
         <span>{(total / 1024).toFixed(0)} GB</span>
@@ -131,12 +131,12 @@ export function VRAMBreakdownBar({ vram, game }: VRAMBreakdownBarProps) {
       {/* Category legend */}
       {usedCategories.length > 0 && (
         <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2">
-          <span className="flex items-center gap-1 text-[10px] text-surface-500">
-            <span className="w-2 h-2 rounded-sm bg-surface-500 inline-block" />
+          <span className="flex items-center gap-1 text-[10px] text-surface-300">
+            <span className="w-2 h-2 rounded-sm bg-surface-400 inline-block" />
             Engine
           </span>
           {usedCategories.map((cat) => (
-            <span key={cat} className="flex items-center gap-1 text-[10px] text-surface-500">
+            <span key={cat} className="flex items-center gap-1 text-[10px] text-surface-300">
               <span
                 className="w-2 h-2 rounded-sm inline-block"
                 style={{ backgroundColor: CATEGORY_COLOR[cat] }}

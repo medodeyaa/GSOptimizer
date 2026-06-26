@@ -236,7 +236,7 @@ function MetricsPanel() {
           {fpsRange && fpsRangePct !== null && (
             <div className="mt-4">
               <div className="flex items-center gap-2">
-                <span className="text-[10px] text-surface-500 w-14 text-right tabular-nums">
+                <span className="text-[10px] text-surface-300 w-14 text-right tabular-nums">
                   {fpsRange.ultra} FPS
                 </span>
                 <div className="flex-1 h-1.5 bg-surface-700 rounded-full overflow-hidden">
@@ -245,11 +245,11 @@ function MetricsPanel() {
                     style={{ width: `${fpsRangePct}%`, transition: "width 0.4s ease-out" }}
                   />
                 </div>
-                <span className="text-[10px] text-surface-500 w-14 tabular-nums">
+                <span className="text-[10px] text-surface-300 w-14 tabular-nums">
                   {fpsRange.low} FPS
                 </span>
               </div>
-              <div className="flex justify-between mt-0.5 pl-16 pr-16 text-[9px] text-surface-600">
+              <div className="flex justify-between mt-0.5 pl-16 pr-16 text-[9px] text-surface-400">
                 <span>Ultra</span>
                 <span>All Low</span>
               </div>

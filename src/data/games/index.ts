@@ -5,6 +5,8 @@ import { CYBERPUNK_2077 }   from "./cyberpunk2077";
 import { CS2 }              from "./cs2";
 import { WITCHER_3 }        from "./witcher3";
 import { HOGWARTS_LEGACY }  from "./hogwarts_legacy";
+import { FORTNITE }         from "./fortnite";
+import { VALORANT }         from "./valorant";
 
 export const GAME_CATALOG: GameDefinition[] = [
   RDR2,
@@ -13,10 +15,12 @@ export const GAME_CATALOG: GameDefinition[] = [
   CS2,
   WITCHER_3,
   HOGWARTS_LEGACY,
+  FORTNITE,
+  VALORANT,
 ];
 
 export function getGameById(id: string): GameDefinition | undefined {
   return GAME_CATALOG.find((g) => g.id === id);
 }
 
-export { RDR2, ELDEN_RING, CYBERPUNK_2077, CS2, WITCHER_3, HOGWARTS_LEGACY };
+export { RDR2, ELDEN_RING, CYBERPUNK_2077, CS2, WITCHER_3, HOGWARTS_LEGACY, FORTNITE, VALORANT };

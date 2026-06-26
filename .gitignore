@@ -24,5 +24,7 @@ dist-ssr
 *.sw?
 
 /archive
+/archive2
 src/data/hardware/tpu_gpus.csv
 src/data/hardware/tpu_cpus.csv
+src/data/games/games.csv

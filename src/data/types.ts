@@ -75,6 +75,22 @@ export interface SettingDefinition {
   tiers: QualityTier[];
 }
 
+/** Where a game's performance numbers came from (for UI transparency). */
+export type SpecSource = "handtuned" | "pcgw" | "estimated";
+
+/** Real published system requirements (from PCGamingWiki), when available. */
+export interface GameRequirements {
+  os?: string;
+  minCPU?: string;
+  recCPU?: string;
+  minGPU?: string;
+  recGPU?: string;
+  minRAM_mb?: number;
+  recRAM_mb?: number;
+  minVRAM_mb?: number;
+  recVRAM_mb?: number;
+}
+
 export interface GameDefinition {
   id: string;
   label: string;
@@ -89,6 +105,10 @@ export interface GameDefinition {
   cpu_weight: number;
   resolution_vram_scalars: Record<Resolution, number>;
   settings: Record<string, SettingDefinition>;
+  /** Provenance of the numbers above. Undefined = hand-tuned/featured. */
+  specSource?: SpecSource;
+  /** Raw published requirements when sourced from PCGamingWiki. */
+  requirements?: GameRequirements;
 }
 
 // ─── Computed / Engine Output ─────────────────────────────────────────────────

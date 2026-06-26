@@ -1,5 +1,6 @@
+import { useRef, useState } from "react";
 import type { Resolution, TargetFPS, RAMType } from "../data/types";
-import { GAME_CATALOG } from "../data/games/index";
+import { GAME_LISTINGS, getGameById, getRealGameById } from "../data/games/index";
 import {
   FULL_GPU_CATALOG,
   FULL_CPU_CATALOG,
@@ -42,6 +43,15 @@ const CPU_OPTIONS: SelectOption[] = FULL_CPU_CATALOG.map((c) => ({
   group: c.brand === "intel" ? "Intel" : "AMD",
 }));
 
+// 20k+ games come from the generated catalog (CSV-derived estimated specs);
+// the 8 hand-tuned games surface first under "Featured". Searchable, like the
+// hardware pickers — rendering them all as buttons would freeze the page.
+const GAME_OPTIONS: SelectOption[] = GAME_LISTINGS.map((g) => ({
+  value: g.id,
+  label: g.label,
+  group: g.genre,
+}));
+
 const RAM_OPTIONS = [8, 16, 32, 64] as const;
 
 const DDR_OPTIONS: { value: RAMType; label: string; description: string }[] = [
@@ -79,6 +89,28 @@ export function ConfigurePage({ onAnalyze }: ConfigurePageProps) {
   const targetFPS    = useTargetFPS();
   const selectedGame = useSelectedGame();
   const configured   = useIsConfigured();
+
+  // Tracks the most recently requested game id so a slow PCGamingWiki fetch for
+  // a previously-selected game can't clobber a newer selection.
+  const latestGameReq = useRef<string | null>(null);
+  const [enriching, setEnriching] = useState(false);
+
+  function handleSelectGame(id: string) {
+    latestGameReq.current = id || null;
+    if (!id) { setGame(null); setEnriching(false); return; }
+
+    // 1. Instant: CSV / hand-tuned estimate so the UI never waits on the network.
+    setGame(getGameById(id) ?? null);
+
+    // 2. Upgrade in the background to real PCGamingWiki specs when available.
+    setEnriching(true);
+    getRealGameById(id)
+      .then((real) => {
+        if (real && latestGameReq.current === id) setGame(real);
+      })
+      .catch(() => { /* keep the estimate */ })
+      .finally(() => { if (latestGameReq.current === id) setEnriching(false); });
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -225,45 +257,32 @@ export function ConfigurePage({ onAnalyze }: ConfigurePageProps) {
           </div>
 
           {/* Game picker */}
-          <div>
+          <Card className="p-5">
             <SectionLabel>Select Game</SectionLabel>
-            <div className="flex flex-col gap-3">
-              {GAME_CATALOG.map((game) => {
-                const active = selectedGame?.id === game.id;
-                return (
-                  <button
-                    key={game.id}
-                    type="button"
-                    onClick={() => setGame(game)}
-                    className={`
-                      w-full text-left p-4 rounded-xl border transition-all duration-150
-                      ${active
-                        ? "bg-accent-primary/8 border-accent-primary/30"
-                        : "bg-surface-800 border-surface-700 hover:border-surface-500"
-                      }
-                    `}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className={`text-[14px] font-semibold ${active ? "text-[#f5f5f5]" : "text-surface-200"}`}>
-                        {game.label}
-                      </span>
-                      {active && (
-                        <svg className="w-4 h-4 text-accent-primary" fill="currentColor" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                        </svg>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 mt-1.5">
-                      <Badge variant="muted">{game.engine}</Badge>
-                      <span className="text-[11px] text-surface-400">
-                        {Object.keys(game.settings).length} configurable settings
-                      </span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+            <HardwareSearchSelect
+              options={GAME_OPTIONS}
+              value={selectedGame?.id ?? null}
+              onChange={handleSelectGame}
+              placeholder="Search your game…"
+              icon="game"
+            />
+            {selectedGame && (
+              <div className="flex items-center gap-2 mt-3 flex-wrap">
+                <Badge variant="muted">{selectedGame.engine}</Badge>
+                {/* Provenance: real published requirements vs. estimated specs. */}
+                {enriching ? (
+                  <Badge variant="muted">Checking PCGamingWiki…</Badge>
+                ) : selectedGame.specSource === "pcgw" ? (
+                  <Badge variant="primary">Real specs · PCGamingWiki</Badge>
+                ) : selectedGame.specSource === "estimated" ? (
+                  <Badge variant="muted">Estimated specs</Badge>
+                ) : null}
+                <span className="text-[12px] text-surface-400">
+                  {Object.keys(selectedGame.settings).length} configurable settings
+                </span>
+              </div>
+            )}
+          </Card>
 
           {/* Resolution */}
           <Card className="p-5">

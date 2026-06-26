@@ -8,8 +8,13 @@ interface HardwareSearchSelectProps {
   placeholder?: string;
   disabled?: boolean;
   /** Icon variant shown in the input */
-  icon?: "cpu" | "gpu";
+  icon?: "cpu" | "gpu" | "game";
 }
+
+// Cap the number of rendered rows so very large catalogs (20k+ games) stay
+// responsive. Options are passed pre-sorted by relevance, so the cap surfaces
+// the most relevant entries; narrowing the search reveals the rest.
+const RENDER_CAP = 150;
 
 // ── Small SVG icons ───────────────────────────────────────────────────────────
 
@@ -30,6 +35,15 @@ function GpuIcon() {
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M6 7V5M10 7V5M14 7V5M18 7V5M7 19v2M17 19v2" />
       <circle cx="8" cy="13" r="1.5" strokeWidth={1.8} />
       <circle cx="13" cy="13" r="1.5" strokeWidth={1.8} />
+    </svg>
+  );
+}
+
+function GameIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+        d="M6 12h4m-2-2v4M15 11h.01M18 13h.01M7.5 7h9a4.5 4.5 0 0 1 4.46 3.9l.6 4.2A2.5 2.5 0 0 1 19.1 18c-.9 0-1.73-.48-2.18-1.26l-.4-.74a2 2 0 0 0-1.74-1H9.22a2 2 0 0 0-1.74 1l-.4.74A2.5 2.5 0 0 1 4.9 18a2.5 2.5 0 0 1-2.46-2.9l.6-4.2A4.5 4.5 0 0 1 7.5 7Z" />
     </svg>
   );
 }
@@ -91,19 +105,23 @@ export function HardwareSearchSelect({
     return deduped.filter((o) => o.label.toLowerCase().includes(q));
   }, [deduped, query]);
 
-  // Group filtered results
+  // Cap how many rows we actually render — large catalogs (20k+ games) would
+  // otherwise mount tens of thousands of DOM nodes on open.
+  const capped = useMemo(() => filtered.slice(0, RENDER_CAP), [filtered]);
+
+  // Group capped results
   const groups = useMemo<[string, SelectOption[]][]>(() => {
     const map = new Map<string, SelectOption[]>();
-    for (const o of filtered) {
+    for (const o of capped) {
       const key = o.group ?? "Other";
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(o);
     }
     return [...map.entries()];
-  }, [filtered]);
+  }, [capped]);
 
-  // Flat list of all filtered options for keyboard nav
-  const flatFiltered = useMemo(() => filtered, [filtered]);
+  // Flat list of rendered options for keyboard nav
+  const flatFiltered = capped;
 
   // Close on outside click
   useEffect(() => {
@@ -158,7 +176,7 @@ export function HardwareSearchSelect({
     setQuery("");
   }
 
-  const Icon = icon === "cpu" ? CpuIcon : GpuIcon;
+  const Icon = icon === "cpu" ? CpuIcon : icon === "game" ? GameIcon : GpuIcon;
 
   return (
     <div ref={containerRef} className="relative" onKeyDown={handleKeyDown}>
@@ -300,7 +318,11 @@ export function HardwareSearchSelect({
             <span>↑↓ navigate</span>
             <span>↵ select</span>
             <span>Esc close</span>
-            <span className="ml-auto">{filtered.length} results</span>
+            <span className="ml-auto">
+              {filtered.length > RENDER_CAP
+                ? `${RENDER_CAP} of ${filtered.length}`
+                : `${filtered.length} results`}
+            </span>
           </div>
         </div>
       )}

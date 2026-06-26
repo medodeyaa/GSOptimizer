@@ -5,7 +5,7 @@ import { ResultsPage }   from "./pages/ResultsPage";
 import { LoadingScreen } from "./components/LoadingScreen";
 import { GPU_CATALOG }   from "./data/hardware/gpu";
 import { CPU_CATALOG }   from "./data/hardware/cpu";
-import { GAME_CATALOG }  from "./data/games/index";
+import { getGameById }  from "./data/games/index";
 import { useAppStore }   from "./store/appStore";
 import type { Resolution, TargetFPS, RAMType } from "./data/types";
 
@@ -31,7 +31,7 @@ export default function App() {
     const store = useAppStore.getState();
     const gpu   = GPU_CATALOG.find((g) => g.id === params.get("gpu"))   ?? null;
     const cpu   = CPU_CATALOG.find((c) => c.id === params.get("cpu"))   ?? null;
-    const game  = GAME_CATALOG.find((g) => g.id === params.get("game")) ?? null;
+    const game  = getGameById(params.get("game") ?? "") ?? null;
     const res   = params.get("res") as Resolution;
     const fps   = Number(params.get("fps")) as TargetFPS;
     const ram   = Number(params.get("ram"));

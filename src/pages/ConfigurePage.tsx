@@ -1,8 +1,11 @@
 import type { Resolution, TargetFPS, RAMType } from "../data/types";
-import { GPU_CATALOG } from "../data/hardware/gpu";
-import { CPU_CATALOG } from "../data/hardware/cpu";
 import { GAME_CATALOG } from "../data/games/index";
-import { FULL_GPU_CATALOG, FULL_CPU_CATALOG } from "../data/hardware/fullCatalog";
+import {
+  FULL_GPU_CATALOG,
+  FULL_CPU_CATALOG,
+  findGPUById,
+  findCPUById,
+} from "../data/hardware/fullCatalog";
 import {
   useActions,
   useSelectedGPU,
@@ -115,14 +118,7 @@ export function ConfigurePage({ onAnalyze }: ConfigurePageProps) {
             <HardwareSearchSelect
               options={GPU_OPTIONS}
               value={selectedGPU?.id ?? null}
-              onChange={(id) => {
-                // First try the hand-tuned catalog (accurate engine scores)
-                const gpu =
-                  GPU_CATALOG.find((g) => g.id === id) ??
-                  FULL_GPU_CATALOG.find((g) => g.id === id) ??
-                  null;
-                setGPU(gpu ?? null);
-              }}
+              onChange={(id) => setGPU(findGPUById(id))}
               placeholder="Search your GPU…"
               icon="gpu"
             />
@@ -130,8 +126,12 @@ export function ConfigurePage({ onAnalyze }: ConfigurePageProps) {
               <div className="flex items-center gap-2 mt-3">
                 <HardwareTierBadge score={selectedGPU.compute_score} />
                 <span className="text-[12px] text-surface-400">
-                  {(selectedGPU.vram_mb / 1024).toFixed(0)} GB VRAM
-                  · {selectedGPU.memory_bandwidth_gbps} GB/s
+                  {selectedGPU.vram_mb > 0
+                    ? `${(selectedGPU.vram_mb / 1024).toFixed(0)} GB VRAM`
+                    : "Shared VRAM"}
+                  {selectedGPU.memory_bandwidth_gbps > 0
+                    ? ` · ${selectedGPU.memory_bandwidth_gbps} GB/s`
+                    : ""}
                 </span>
               </div>
             )}
@@ -143,14 +143,7 @@ export function ConfigurePage({ onAnalyze }: ConfigurePageProps) {
             <HardwareSearchSelect
               options={CPU_OPTIONS}
               value={selectedCPU?.id ?? null}
-              onChange={(id) => {
-                // First try the hand-tuned catalog (accurate engine scores)
-                const cpu =
-                  CPU_CATALOG.find((c) => c.id === id) ??
-                  FULL_CPU_CATALOG.find((c) => c.id === id) ??
-                  null;
-                setCPU(cpu ?? null);
-              }}
+              onChange={(id) => setCPU(findCPUById(id))}
               placeholder="Search your CPU…"
               icon="cpu"
             />

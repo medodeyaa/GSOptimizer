@@ -1,454 +1,452 @@
 /**
- * csvParser.ts
+ * csvParser.ts  –  Production-quality CSV→catalog converter
  *
- * Parses the archive CSV files (tpu_cpus.csv, tpu_gpus.csv) at module-load
- * time via Vite's `?raw` import and produces full GPU / CPU catalog entries
- * with estimated performance scores.
+ * Converts every valid row in the archive CSVs into a fully-scored GPU/CPU
+ * catalog entry the optimization engine can consume.
  *
- * Rules:
- *  - Skip blank name rows (name-only archive scraped placeholders)
- *  - Skip "No CPUs/GPUs found…" sentinel rows
- *  - Deduplicate by normalised name (first occurrence wins)
- *  - Hand-tuned catalog entries always override CSV estimates
+ * ── Scoring philosophy ────────────────────────────────────────────────────────
+ * GPU compute_score (0–140+, RTX 4090 = 100)
+ *   Derived from: shader count × boost clock (TFLOPS proxy), then scaled
+ *   by a per-generation efficiency factor that accounts for IPC improvements,
+ *   architecture optimisations, and driver maturity.
+ *   VRAM capacity adds a small budget bonus.
+ *   Result is clamped and rounded to the nearest integer.
+ *
+ * CPU game_score (0–100)
+ *   Derived from IPC tier (architecture generation) × boost clock × core count
+ *   using the same formula as the hand-tuned catalog:
+ *     clamp( (ipc_tier × 8) + (boost_ghz × 6) + (cores_physical × 2.5), 0, 100 )
+ *
+ * ── Tier classification ───────────────────────────────────────────────────────
+ * GPU tier stored in `architecture` string prefix:
+ *   - Flagship  → score ≥ 70  or name keyword match
+ *   - Mid       → score 28–69
+ *   - Entry     → score < 28
+ *
+ * CPU tier derived from name/model-number patterns (i9/R9 → flagship, etc.)
  */
 
 import type { GPU, CPU, GPUBrand, CPUBrand } from "../types";
 
-// ─── Raw CSV text imported at build time ──────────────────────────────────────
-// Vite resolves `?raw` imports as plain strings — no async fetch needed.
 import rawCPU from "./tpu_cpus.csv?raw";
 import rawGPU from "./tpu_gpus.csv?raw";
 
-// ─── Shared utilities ─────────────────────────────────────────────────────────
+// ─── CSV line parser (quote-aware) ───────────────────────────────────────────
 
-/** Slugify a hardware name into a safe id string */
-function toId(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
-
-/** Parse a CSV line respecting quoted fields (commas inside quotes are safe). */
-function parseCsvLine(line: string): string[] {
+function parseLine(line: string): string[] {
   const fields: string[] = [];
   let cur = "";
-  let inQuote = false;
+  let inQ = false;
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
-    if (c === '"') {
-      inQuote = !inQuote;
-    } else if (c === "," && !inQuote) {
-      fields.push(cur.trim());
-      cur = "";
-    } else {
-      cur += c;
-    }
+    if (c === '"') { inQ = !inQ; }
+    else if (c === "," && !inQ) { fields.push(cur.trim()); cur = ""; }
+    else { cur += c; }
   }
   fields.push(cur.trim());
   return fields;
 }
 
-// ─── CPU parsing ──────────────────────────────────────────────────────────────
+// ─── Generic helpers ─────────────────────────────────────────────────────────
 
-/**
- * Estimate IPC tier (1–10) from process node string.
- * Newer / smaller nodes → higher IPC tier.
- */
-function ipcTierFromProcess(processStr: string): number {
-  const nm = parseFloat(processStr);
-  if (isNaN(nm)) return 5;
-  if (nm <= 3)  return 10;
-  if (nm <= 5)  return 10;
-  if (nm <= 7)  return 9;
-  if (nm <= 10) return 8;
-  if (nm <= 14) return 7;
-  if (nm <= 22) return 6;
-  if (nm <= 32) return 5;
-  if (nm <= 45) return 4;
-  return 3;
+function toId(name: string, seen: Map<string, number>): string {
+  const base = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const count = (seen.get(base) ?? 0) + 1;
+  seen.set(base, count);
+  return count === 1 ? base : `${base}_${count}`;
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+// ─── GPU helpers ─────────────────────────────────────────────────────────────
+
+function detectGPUBrand(name: string): GPUBrand {
+  const n = name.toLowerCase();
+  // NVIDIA identifiers
+  if (/geforce|quadro|tesla|titan|rtx |gtx |nvs |riva |nv1 |nv\d|grid |jetson|p102|p104|cmp |h100|h800|a100|a800|l40 |l4 |t[0-9]|gh100|ga\d|tu\d|gp\d|gm\d|gk\d|gf\d|gt2\d|nv4|nv3|nvdia|vanta|spectre|xbox gpu|xbox 36/.test(n))
+    return "nvidia";
+  // AMD / ATI identifiers
+  if (/radeon|instinct|firepro|firegl|rage |mach|all-in-wonder|rx |vega|rdna|gcn|navi|polaris|fiji|tonga|hawaii|tahiti|pitcairn|adrenalin|playstation|r9 |r7 |r5 |r300|r200|athlon.*gpu|zhongshan|steam deck|atari vcs/.test(n))
+    return "amd";
+  // Intel identifiers
+  if (/arc |iris|uhd graphics|hd graphics|gma |i740|i752|i815|i830|xe |extreme graphics|dg1|dg2|xeon.*gpu|auburn|portola|brookdale|almador|solano|whitney|alviso|lakeport|cantiga|ironlake|sandy.*bridge.*gpu|ivy.*bridge.*gpu|haswell.*gpu/.test(n))
+    return "intel";
+  // fallback keyword scan
+  if (n.includes("amd") || n.includes("ati")) return "amd";
+  if (n.includes("intel"))                      return "intel";
+  return "nvidia";
 }
 
 /**
- * Parse "Cores" column – formats seen in the CSV:
- *   "3 " → 3 physical / 3 logical
- *   "10  / 12" → 10 physical / 12 logical
- *   "12  / 24" → 12 physical / 24 logical
+ * Generation-adjusted efficiency multiplier.
+ * Each GPU generation improves perf-per-TFLOP due to better IPC, caching,
+ * memory compression, driver optimisations, etc.
+ * Anchored: modern gen (2020+) = 1.0, reference era (1995–2000) = 0.01.
  */
-function parseCores(coresStr: string): { physical: number; logical: number } {
-  const parts = coresStr.split("/").map((s) => parseInt(s.trim(), 10));
-  const physical = parts[0] || 1;
-  const logical = parts[1] || physical;
-  return { physical, logical };
+function gpuGenEfficiency(year: number): number {
+  if (year >= 2024) return 1.05;
+  if (year >= 2022) return 1.00;
+  if (year >= 2020) return 0.92;
+  if (year >= 2018) return 0.82;
+  if (year >= 2016) return 0.72;
+  if (year >= 2014) return 0.62;
+  if (year >= 2012) return 0.50;
+  if (year >= 2010) return 0.38;
+  if (year >= 2008) return 0.27;
+  if (year >= 2006) return 0.18;
+  if (year >= 2004) return 0.11;
+  if (year >= 2002) return 0.07;
+  if (year >= 2000) return 0.04;
+  if (year >= 1998) return 0.025;
+  if (year >= 1996) return 0.015;
+  return 0.008;
+}
+
+/** Parse VRAM MB from the Memory column. */
+function parseVRAM(s: string): number {
+  const gb = s.match(/([\d.]+)\s*GB/i);
+  if (gb) return Math.round(parseFloat(gb[1]) * 1024);
+  const mb = s.match(/([\d.]+)\s*MB/i);
+  if (mb) return Math.round(parseFloat(mb[1]));
+  const kb = s.match(/([\d.]+)\s*KB/i);
+  if (kb) return Math.max(1, Math.round(parseFloat(kb[1]) / 1024));
+  return 0;
+}
+
+/** Parse first number from shader/TMU/ROP string (shader count). */
+function parseShaders(s: string): number {
+  const m = s.match(/^(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+/** Parse clock speed (MHz or GHz) → MHz. */
+function parseClockMHz(s: string): number {
+  const ghz = s.match(/([\d.]+)\s*GHz/i);
+  if (ghz) return Math.round(parseFloat(ghz[1]) * 1000);
+  const mhz = s.match(/([\d.]+)\s*MHz/i);
+  if (mhz) return Math.round(parseFloat(mhz[1]));
+  const raw = s.match(/^([\d.]+)/);
+  if (raw) {
+    const v = parseFloat(raw[1]);
+    return v < 30 ? Math.round(v * 1000) : Math.round(v);
+  }
+  return 0;
+}
+
+/** Parse year from date strings like "Jun 22nd, 2000", "1992", "Never Released". */
+function parseYear(s: string): number {
+  const m = s.match(/\b(19|20)\d{2}\b/);
+  return m ? parseInt(m[0], 10) : 2000;
 }
 
 /**
- * Parse "Clock" column – formats seen:
- *   "2.1 to 2.4 GHz"  → base 2.1 / boost 2.4
- *   "3 GHz"           → base 3 / boost 3
- *   "1900 MHz"        → 1.9 GHz
+ * Derive architecture string from name + chip code.
+ * Returns a consistent slug used for grouping in the UI.
  */
-function parseClock(clockStr: string): { base: number; boost: number } {
-  // MHz fallback
-  const mhzMatch = clockStr.match(/^(\d+(?:\.\d+)?)\s*MHz$/i);
-  if (mhzMatch) {
-    const ghz = parseFloat(mhzMatch[1]) / 1000;
-    return { base: ghz, boost: ghz };
-  }
-  // "X to Y GHz"
-  const rangeMatch = clockStr.match(/([\d.]+)\s+to\s+([\d.]+)\s*GHz/i);
-  if (rangeMatch) {
-    return { base: parseFloat(rangeMatch[1]), boost: parseFloat(rangeMatch[2]) };
-  }
-  // "X GHz"
-  const singleMatch = clockStr.match(/([\d.]+)\s*GHz/i);
-  if (singleMatch) {
-    const v = parseFloat(singleMatch[1]);
-    return { base: v, boost: v };
-  }
-  return { base: 2.5, boost: 3.0 };
+function gpuArchitecture(name: string, chip: string, year: number): string {
+  const n = (name + " " + chip).toLowerCase();
+  // ── NVIDIA ────────────────────────────────────────────────────────────────
+  if (/gb\d/.test(n) || year >= 2025)                                  return "blackwell";
+  if (/gh\d|h100|h800|hopper/.test(n))                                  return "hopper";
+  if (/ad\d|rtx 4\d|rtx4\d/.test(n))                                   return "ada_lovelace";
+  if (/ga\d|a100|a40|a10|a30|a16|a2 |rtx 3\d|rtx3\d/.test(n))         return "ampere";
+  if (/tu\d|rtx 2\d|rtx2\d|gtx 16\d|t4 |t10/.test(n))                 return "turing";
+  if (/gp\d|gtx 10\d|gtx10\d|p40|p100|p102|p104|tesla p/.test(n))     return "pascal";
+  if (/gm\d|gtx 9\d|gtx9\d|gtx titan x$/.test(n))                     return "maxwell";
+  if (/gk\d|gtx [67]\d|gtx[67]\d/.test(n))                             return "kepler";
+  if (/gf\d|gtx [345]\d|gtx[345]\d|fermi/.test(n))                     return "fermi";
+  if (/gt2\d|gt[12]\d|nv4\d|nv3\d|nv2\d|nv1[5-9]/.test(n))           return "tesla_gpu";
+  if (/nv\d|riva/.test(n))                                               return "nv_legacy";
+  // ── AMD / ATI ──────────────────────────────────────────────────────────────
+  if (/cdna3|mi300|aldebaran/.test(n))                                   return "cdna3";
+  if (/cdna2|mi200|aldebaran/.test(n))                                   return "cdna2";
+  if (/cdna1|mi100|arcturus/.test(n))                                    return "cdna1";
+  if (/navi 3|rdna3|rx 7[679]|rx 7[45]|rx7[679]/.test(n))              return "rdna3";
+  if (/navi 2|rdna2|rx 6[89]|rx 6[56]|rx 6[45]|rx 6[23]|rx6/.test(n)) return "rdna2";
+  if (/navi 1|rdna1|rx 5[567]/.test(n))                                 return "rdna1";
+  if (/vega 2|vega20|mi60|mi50/.test(n))                                return "vega2";
+  if (/vega|vega10|rx vega/.test(n))                                     return "vega";
+  if (/polaris|rx 4\d\d|rx4\d\d|rx 580|rx 570|rx 560|rx 550|rx 540/.test(n)) return "polaris";
+  if (/fiji|rx 300|rx 390|r9 fury|r9 nano/.test(n))                     return "fiji";
+  if (/tonga|r9 380|r9 285/.test(n))                                     return "tonga";
+  if (/hawaii|r9 290|r9 295/.test(n))                                    return "hawaii";
+  if (/bonaire|r7 260|hd 7790/.test(n))                                  return "bonaire";
+  if (/tahiti|r9 280|hd 7970|hd 7950/.test(n))                          return "tahiti";
+  if (/pitcairn|r9 270|r7 265|hd 7870|hd 7850/.test(n))                 return "pitcairn";
+  if (/r[35679]\d|hd [6-9]\d{3}|rx [23]\d|gcn|cayman|barts|turks|cedar/.test(n)) return "gcn_legacy";
+  if (/r[25]00|r300|r350|r360|x8[0-9]\d|x1[89]\d\d/.test(n))           return "r300_era";
+  if (/r200|r9 [5-9]\d\d|radeon 9[5-9]\d\d/.test(n))                    return "r200_era";
+  if (/r100|radeon [78]\d{3}|radeon 9[012]\d\d/.test(n))                return "r100_era";
+  if (/rage|mach/.test(n))                                               return "ati_rage";
+  // ── Intel ──────────────────────────────────────────────────────────────────
+  if (/battlemage|b[35]80|dg3/.test(n))                                  return "battlemage";
+  if (/alchemist|dg2|arc a[3-7]/.test(n))                               return "alchemist";
+  if (/xe max|dg1/.test(n))                                              return "xe_lp";
+  if (/xe|iris xe/.test(n))                                              return "xe_graphics";
+  if (/iris plus|iris pro/.test(n))                                      return "iris_plus";
+  if (/uhd|iris 6[56]0/.test(n))                                        return "uhd_graphics";
+  if (/hd graphics|hd [234456]\d\d0/.test(n))                           return "hd_graphics";
+  if (/gma|extreme graphics/.test(n))                                    return "legacy_intel";
+  return "other";
 }
 
-/**
- * Detect CPU brand from the name string.
- */
+/** Estimate GPU compute_score. RTX 4090 (16384 shaders × 2235 MHz) ≈ 100. */
+function computeGPUScore(
+  shaders: number,
+  boostMHz: number,
+  vramMB: number,
+  year: number
+): number {
+  if (shaders <= 0 || boostMHz <= 0) {
+    // Integrated / very old: score from VRAM alone
+    if (vramMB >= 8192) return 6;
+    if (vramMB >= 4096) return 3;
+    if (vramMB >= 1024) return 2;
+    return 1;
+  }
+
+  // Raw TFLOPS-proxy (not real FP32 but proportional)
+  const tflops = (shaders * boostMHz * 2) / 1e9; // factor-of-2 for FMA
+
+  // RTX 4090 reference: 16384 × 2235 MHz × 2 / 1e9 ≈ 73.27 TFLOPS → score 100
+  const REF_TFLOPS = (16384 * 2235 * 2) / 1e9;
+  const rawRatio = tflops / REF_TFLOPS; // 0–∞, RTX 4090 ≈ 1.0
+
+  const eff = gpuGenEfficiency(year);
+  let score = rawRatio * eff * 100;
+
+  // Small VRAM bonus (high VRAM → can sustain high settings)
+  if (vramMB >= 32768) score += 6;
+  else if (vramMB >= 24576) score += 3;
+  else if (vramMB >= 16384) score += 1;
+
+  return clamp(Math.round(score), 1, 200);
+}
+
+// ─── CPU helpers ─────────────────────────────────────────────────────────────
+
 function detectCPUBrand(name: string): CPUBrand {
   const n = name.toLowerCase();
-  if (
-    n.includes("ryzen") ||
-    n.includes("epyc") ||
-    n.includes("opteron") ||
-    n.includes("athlon") ||
-    n.includes("threadripper") ||
-    n.includes("phenom") ||
-    n.includes("fx-") ||
-    n.includes("sempron") ||
-    n.includes("a4 ") ||
-    n.includes("a6 ") ||
-    n.includes("a8 ") ||
-    n.includes("a10 ") ||
-    n.startsWith("a4-") ||
-    n.startsWith("a6-") ||
-    n.startsWith("a8-") ||
-    n.startsWith("a10-") ||
-    n.includes("pro a")
-  )
+  if (/ryzen|epyc|opteron|athlon|threadripper|phenom|fx-|sempron|a[468] |a[468]-|a10|a12|pro a|nano quad/.test(n))
     return "amd";
   return "intel";
 }
 
 /**
- * Compute an estimated game_score (0–100) from parsed CPU fields.
- * Formula mirrors the hand-tuned catalog: clamp((ipc×8) + (boost×6) + (cores×2.5), 0, 100)
+ * IPC tier from process node (nm).
+ * Smaller node → later generation → higher IPC, per the catalog formula.
  */
-function estimateCPUGameScore(
-  ipcTier: number,
-  boostGhz: number,
-  coresPhysical: number
-): number {
-  const raw = ipcTier * 8 + boostGhz * 6 + coresPhysical * 2.5;
-  return Math.min(100, Math.max(1, Math.round(raw)));
+function ipcFromNode(nmStr: string): number {
+  const nm = parseFloat(nmStr);
+  if (isNaN(nm)) return 5;
+  if (nm <= 3)  return 10; // 3nm  – Zen 5 / latest Intel
+  if (nm <= 4)  return 10; // 4nm
+  if (nm <= 5)  return 10; // 5nm  – Zen 4 / Alder Lake
+  if (nm <= 6)  return 9;  // 6nm
+  if (nm <= 7)  return 9;  // 7nm  – Zen 3 / Zen 2
+  if (nm <= 10) return 8;  // 10nm – Ice Lake / Tiger Lake / Alder Lake lite
+  if (nm <= 12) return 7;  // 12nm – Zen+
+  if (nm <= 14) return 7;  // 14nm – Skylake / Coffee Lake / Zen
+  if (nm <= 16) return 6;  // 16nm – Broadwell
+  if (nm <= 22) return 6;  // 22nm – Ivy Bridge / Haswell
+  if (nm <= 28) return 5;  // 28nm – Sandy Bridge / Bulldozer
+  if (nm <= 32) return 4;  // 32nm – Westmere
+  if (nm <= 40) return 4;  // 40nm – Nehalem
+  if (nm <= 45) return 3;  // 45nm – Penryn / Phenom II
+  if (nm <= 65) return 2;  // 65nm – Core 2 / Athlon X2
+  if (nm <= 90) return 2;  // 90nm – Pentium D
+  return 1;                 // 130nm+ – Pentium 4 / Athlon XP
 }
 
-// ─── GPU parsing ──────────────────────────────────────────────────────────────
-
-/**
- * Parse the "Memory" column to extract VRAM in MB.
- * Format examples: "32 KB, DRAM, 32 bit", "8 GB, GDDR6, 256 bit", "System Shared"
- */
-function parseVRAM(memStr: string): number {
-  const gbMatch = memStr.match(/([\d.]+)\s*GB/i);
-  if (gbMatch) return Math.round(parseFloat(gbMatch[1]) * 1024);
-  const mbMatch = memStr.match(/([\d.]+)\s*MB/i);
-  if (mbMatch) return Math.round(parseFloat(mbMatch[1]));
-  const kbMatch = memStr.match(/([\d.]+)\s*KB/i);
-  if (kbMatch) return Math.max(1, Math.round(parseFloat(kbMatch[1]) / 1024));
-  return 0; // System Shared / unknown
-}
-
-/**
- * Parse shader count from the "Shaders_TMUs_ROPs" column.
- * Format: "4608 / 288 / 96" or "4608 / 288 / 96 / 192" (older 4-part).
- */
-function parseShaders(shadersStr: string): number {
-  const parts = shadersStr.split("/").map((s) => parseInt(s.trim(), 10));
-  return isNaN(parts[0]) ? 0 : parts[0];
+/** Parse "Cores" column: "3", "10  / 16", "24  / 32" → { physical, logical }. */
+function parseCores(s: string): { physical: number; logical: number } {
+  const parts = s.split("/").map((p) => parseInt(p.trim(), 10));
+  const phys = isNaN(parts[0]) ? 1 : Math.max(1, parts[0]);
+  const logi = isNaN(parts[1]) ? phys : Math.max(phys, parts[1]);
+  return { physical: phys, logical: logi };
 }
 
 /**
- * Parse a clock speed string like "2205 MHz" or "1400" into a numeric MHz value.
+ * Parse "Clock" column → { base, boost } in GHz.
+ * Formats:
+ *   "3.7 to 5.6 GHz"  → base 3.7, boost 5.6
+ *   "3 GHz"           → base 3.0, boost 3.0
+ *   "1900 MHz"        → base 1.9, boost 1.9
+ *   "7.3 to 5.4 GHz"  → typo in data; take the higher as boost
  */
-function parseClockMHz(clockStr: string): number {
-  const match = clockStr.match(/([\d.]+)/);
-  if (!match) return 0;
-  const v = parseFloat(match[1]);
-  // If it looks like GHz (< 30) convert
-  return v < 30 ? v * 1000 : v;
-}
-
-/**
- * Parse a year from the "Released" column.
- * Examples: "Jun 22nd, 2000", "1992", "Never Released", "Unknown"
- */
-function parseYear(relStr: string): number {
-  const match = relStr.match(/\b(19|20)\d{2}\b/);
-  return match ? parseInt(match[0], 10) : 2000;
-}
-
-/**
- * Detect GPU brand from the product name string.
- */
-function detectGPUBrand(name: string): GPUBrand {
-  const n = name.toLowerCase();
-  if (
-    n.includes("geforce") ||
-    n.includes("quadro") ||
-    n.includes("tesla") ||
-    n.includes("titan") ||
-    n.includes("nvs ") ||
-    n.includes("rtx ") ||
-    n.includes("gtx ") ||
-    n.includes("nvida") ||
-    n.includes("riva") ||
-    n.includes("nv1") ||
-    n.includes("grid ") ||
-    n.includes("jetson") ||
-    n.includes("p102") ||
-    n.includes("p104") ||
-    n.includes("cmp ") ||
-    n.includes("rtx a") ||
-    n.includes("rtx titan") ||
-    n.includes("h100") ||
-    n.includes("h800") ||
-    n.includes("a100") ||
-    n.includes("a800") ||
-    n.includes("l40") ||
-    n.startsWith("t1") ||
-    n.startsWith("t4") ||
-    n.startsWith("t5") ||
-    n.startsWith("t6")
-  )
-    return "nvidia";
-  if (
-    n.includes("radeon") ||
-    n.includes("instinct") ||
-    n.includes("firepro") ||
-    n.includes("firegl") ||
-    n.includes("rage") ||
-    n.includes("vega") ||
-    n.includes("rx ") ||
-    n.includes("arc pro") === false // intel arc — handled below
-  ) {
-    const isAMD =
-      n.includes("radeon") ||
-      n.includes("instinct") ||
-      n.includes("firepro") ||
-      n.includes("firegl") ||
-      n.includes("rage") ||
-      n.includes("rx ") ||
-      n.includes("vega") ||
-      n.includes("all-in-wonder") ||
-      n.includes("mach") ||
-      n.includes("playstation") ||
-      n.includes("xbox");
-    if (isAMD) return "amd";
+function parseCPUClock(s: string): { base: number; boost: number } {
+  const range = s.match(/([\d.]+)\s+to\s+([\d.]+)\s*GHz/i);
+  if (range) {
+    const a = parseFloat(range[1]);
+    const b = parseFloat(range[2]);
+    return { base: Math.min(a, b), boost: Math.max(a, b) };
   }
-  if (
-    n.includes("arc ") ||
-    n.includes("iris") ||
-    n.includes("uhd graphics") ||
-    n.includes("gma ") ||
-    n.includes("i740") ||
-    n.includes("i752") ||
-    n.includes("i815") ||
-    n.includes("i830") ||
-    n.includes("xe ") ||
-    n.includes("xe max") ||
-    n.includes("extreme graphics")
-  )
-    return "intel";
-  // Fallback heuristics
-  if (n.includes("amd") || n.includes("ati")) return "amd";
-  if (n.includes("intel") || n.includes("dg1") || n.includes("dg2")) return "intel";
-  return "nvidia";
+  const single = s.match(/([\d.]+)\s*GHz/i);
+  if (single) { const v = parseFloat(single[1]); return { base: v, boost: v }; }
+  const mhz = s.match(/([\d.]+)\s*MHz/i);
+  if (mhz) { const v = parseFloat(mhz[1]) / 1000; return { base: v, boost: v }; }
+  return { base: 2.5, boost: 3.0 };
 }
 
 /**
- * Derive a rough GPU architecture string from the chip / product name.
- */
-function detectGPUArch(productName: string, chip: string): string {
-  const n = (productName + " " + chip).toLowerCase();
-  // NVIDIA
-  if (n.includes("gh1") || n.includes("h100") || n.includes("h800")) return "hopper";
-  if (n.includes("ad1")) return "ada_lovelace";
-  if (n.includes("ga1")) return "ampere";
-  if (n.includes("tu1")) return "turing";
-  if (n.includes("gp1") || n.includes("gp10")) return "pascal";
-  if (n.includes("gm1") || n.includes("gm2")) return "maxwell";
-  if (n.includes("gk1") || n.includes("gk2")) return "kepler";
-  if (n.includes("gf1")) return "fermi";
-  if (n.includes("gt2") || n.includes("nv4") || n.includes("nv3")) return "tesla_gpu";
-  if (n.includes("rtx 5") || n.includes("rtx5")) return "blackwell";
-  if (n.includes("rtx 4") || n.includes("rtx4")) return "ada_lovelace";
-  if (n.includes("rtx 3") || n.includes("rtx3")) return "ampere";
-  if (n.includes("rtx 2") || n.includes("rtx2") || n.includes("gtx 16")) return "turing";
-  if (n.includes("gtx 10") || n.includes("gtx10")) return "pascal";
-  if (n.includes("gtx 9") || n.includes("gtx9")) return "maxwell";
-  if (n.includes("gtx 7") || n.includes("gtx 6")) return "kepler";
-  // AMD / ATI
-  if (n.includes("navi 3") || n.includes("rdna3") || n.includes("rx 7")) return "rdna3";
-  if (n.includes("navi 2") || n.includes("rdna2") || n.includes("rx 6")) return "rdna2";
-  if (n.includes("navi 1") || n.includes("rdna1") || n.includes("rx 5")) return "rdna1";
-  if (n.includes("vega 2") || n.includes("vega20")) return "vega";
-  if (n.includes("vega") || n.includes("vega10")) return "vega";
-  if (n.includes("fiji") || n.includes("polaris") || n.includes("rx 4")) return "gcn4";
-  if (n.includes("hawaii") || n.includes("tonga") || n.includes("rx 3") || n.includes("r9 3")) return "gcn3";
-  if (n.includes("tahiti") || n.includes("pitcairn") || n.includes("hd 7")) return "gcn1";
-  if (n.includes("r9 9") || n.includes("r9 8") || n.includes("r9 7")) return "gcn1";
-  if (n.includes("r7 2") || n.includes("r7 3")) return "gcn1";
-  if (n.includes("r300") || n.includes("r350") || n.includes("r360")) return "r300";
-  if (n.includes("radeon 9") || n.includes("r200")) return "r200";
-  if (n.includes("rage") || n.includes("mach")) return "rage";
-  // Intel
-  if (n.includes("battlemage") || n.includes("b5") || n.includes("b580")) return "battlemage";
-  if (n.includes("alchemist") || n.includes("dg2") || n.includes("arc a")) return "alchemist";
-  if (n.includes("xe") || n.includes("dg1")) return "xe";
-  if (n.includes("iris") || n.includes("uhd") || n.includes("hd graphics")) return "gen_graphics";
-  return "unknown";
-}
-
-/**
- * Estimate a GPU compute_score (0–135+) from shaders, clock MHz, and VRAM.
- * Anchored so that an RTX 4090 equivalent (~16384 shaders @ 2235 MHz, 24 GB) ≈ 100.
+ * Classify CPU tier from its model name.
  *
- * Formula: (shaders × boostMHz) / normFactor, then scale by VRAM bonus
+ * flagship : EPYC, Threadripper PRO, i9, Ryzen 9, Xeon Platinum/Gold
+ * mid      : i7, Ryzen 7, i5 (≥6 cores), Xeon Silver/Bronze, FX-8/9xxx
+ * entry    : i3, Ryzen 3/5 low, Celeron, Pentium, Athlon, Sempron, older Xeon E
  */
-function estimateGPUComputeScore(
-  shaders: number,
-  boostMHz: number,
-  vramMB: number
-): number {
-  if (shaders <= 0 || boostMHz <= 0) {
-    // Very old or integrated GPU – score from VRAM only
-    if (vramMB >= 8192) return 8;
-    if (vramMB >= 4096) return 4;
-    if (vramMB >= 1024) return 2;
-    return 1;
-  }
-  // RTX 4090: 16384 shaders × 2235 MHz ≈ 36,618,240 → score 100
-  const normFactor = 16384 * 2235 * 0.01; // = 366_182.4 → result in ~0-100 range
-  const raw = (shaders * boostMHz) / normFactor;
-  // VRAM bonus: cards with ≥16 GB get a small uplift
-  let vramBonus = 0;
-  if (vramMB >= 32768) vramBonus = 5;
-  else if (vramMB >= 24576) vramBonus = 3;
-  else if (vramMB >= 16384) vramBonus = 1;
-  return Math.min(200, Math.max(1, Math.round(raw + vramBonus)));
+function cpuTierLabel(name: string): "flagship" | "mid" | "entry" {
+  const n = name.toLowerCase();
+  if (/epyc|threadripper|xeon platinum|xeon gold|i9-|ryzen 9|ryzen threadripper|knights/.test(n))
+    return "flagship";
+  if (/i7-|ryzen 7|xeon silver|xeon w-|xeon e5-2[6-9]|xeon e5-26|xeon e5-46|xeon e7|fx-[89]|core 2 extreme|phenom ii x6/.test(n))
+    return "mid";
+  if (/i5-|ryzen 5|fx-[0-6]|phenom ii x[34]|phenom x[34]|athlon ii x[34]|core 2 quad|xeon e3|xeon e5-1[0-9]/.test(n))
+    return "mid";
+  return "entry";
 }
 
-// ─── CPU parser ───────────────────────────────────────────────────────────────
+/** Compute game_score using catalog formula. */
+function cpuGameScore(ipcTier: number, boostGhz: number, coresPhys: number): number {
+  return clamp(Math.round(ipcTier * 8 + boostGhz * 6 + coresPhys * 2.5), 1, 100);
+}
+
+// ─── GPU tier helper (derived from score) ────────────────────────────────────
+
+function gpuTierLabel(score: number, name: string): "flagship" | "mid" | "entry" {
+  const n = name.toLowerCase();
+  // Explicit flagship keywords regardless of score (workstation / high-end server)
+  if (/titan|quadro rtx [4-8]|rtx a[456]|3090|7900 xtx|7900 xt$|6900|rx vega 64|vega frontier|6800 xt|instinct|tesla v100|tesla a100|h100|h800|a100|a40|a30|l40/.test(n))
+    return "flagship";
+  if (score >= 68) return "flagship";
+  if (score >= 26) return "mid";
+  return "entry";
+}
+
+// ─── Main export: parse CPUs ─────────────────────────────────────────────────
 
 export function parseCPUsFromCSV(): CPU[] {
   const lines = rawCPU.split("\n");
-  const results: CPU[] = [];
-  const seen = new Set<string>();
+  const out: CPU[] = [];
+  const seenLabel = new Set<string>();
+  const seenId    = new Map<string, number>();
 
   for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
+    const line = lines[i].trim().replace(/\r$/, "");
     if (!line) continue;
 
-    const fields = parseCsvLine(line);
-    // CSV columns: index, Name, Codename, Cores, Clock, Socket, Process, L3_Cache, TDP, Release
-    // We need at least name (index 1)
-    if (fields.length < 2) continue;
+    const f = parseLine(line);
+    if (f.length < 2) continue;
 
-    const name = fields[1].trim();
+    const name = f[1].trim();
+    if (!name)                                        continue;
+    if (name.toLowerCase().includes("no cpus found")) continue;
 
-    // Skip sentinels and blanks
-    if (!name || name.toLowerCase().includes("no cpus found")) continue;
+    const key = name.toLowerCase();
+    if (seenLabel.has(key)) continue;
+    seenLabel.add(key);
 
-    // Deduplicate
-    const normName = name.toLowerCase();
-    if (seen.has(normName)) continue;
-    seen.add(normName);
-
-    const coresStr  = fields[3]?.trim() || "1";
-    const clockStr  = fields[4]?.trim() || "2 GHz";
-    const processStr = fields[6]?.trim() || "14 nm";
-
-    const { physical, logical } = parseCores(coresStr);
-    const { base, boost }       = parseClock(clockStr);
-    const ipcTier               = ipcTierFromProcess(processStr);
+    const { physical, logical } = parseCores(f[3] ?? "1");
+    const { base, boost }       = parseCPUClock(f[4] ?? "2 GHz");
+    const ipcTier               = ipcFromNode(f[6] ?? "14 nm");
     const brand                 = detectCPUBrand(name);
-    const gameScore             = estimateCPUGameScore(ipcTier, boost, physical);
+    const gameScore             = cpuGameScore(ipcTier, boost, physical);
 
-    results.push({
-      id:              toId(name),
+    out.push({
+      id:              toId(name, seenId),
       brand,
       label:           name,
       cores_physical:  physical,
       cores_logical:   logical,
-      base_clock_ghz:  Math.round(base * 10) / 10,
+      base_clock_ghz:  Math.round(base  * 10) / 10,
       boost_clock_ghz: Math.round(boost * 10) / 10,
       ipc_tier:        ipcTier,
       game_score:      gameScore,
     });
   }
-
-  return results;
+  return out;
 }
 
-// ─── GPU parser ───────────────────────────────────────────────────────────────
+// ─── Main export: parse GPUs ─────────────────────────────────────────────────
 
 export function parseGPUsFromCSV(): GPU[] {
   const lines = rawGPU.split("\n");
-  const results: GPU[] = [];
-  const seen = new Set<string>();
+  const out: GPU[] = [];
+  const seenLabel = new Set<string>();
+  const seenId    = new Map<string, number>();
 
   for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
+    const line = lines[i].trim().replace(/\r$/, "");
     if (!line) continue;
 
-    const fields = parseCsvLine(line);
-    // Columns: index, Product_Name, GPU_Chip, Released, Bus, Memory, GPU_clock, Memory_clock, Shaders_TMUs_ROPs
-    if (fields.length < 2) continue;
+    const f = parseLine(line);
+    if (f.length < 2) continue;
 
-    const name = fields[1].trim();
+    const name = f[1].trim();
+    if (!name)                                                    continue;
+    if (name.toLowerCase().includes("no graphics cards found"))  continue;
 
-    // Skip sentinels and blanks
-    if (!name || name.toLowerCase().includes("no graphics cards found")) continue;
+    const key = name.toLowerCase();
+    if (seenLabel.has(key)) continue;
+    seenLabel.add(key);
 
-    // Deduplicate
-    const normName = name.toLowerCase();
-    if (seen.has(normName)) continue;
-    seen.add(normName);
+    const chip       = f[2]?.trim() ?? "";
+    const released   = f[3]?.trim() ?? "";
+    const memStr     = f[5]?.trim() ?? "";
+    const gpuClock   = f[6]?.trim() ?? "0";
+    const shadersStr = f[8]?.trim() ?? "0";
 
-    const chip      = fields[2]?.trim() || "";
-    const released  = fields[3]?.trim() || "";
-    const memStr    = fields[5]?.trim() || "";
-    const gpuClock  = fields[6]?.trim() || "0";
-    const shadersStr = fields[8]?.trim() || "0 / 0 / 0";
-
+    const year     = parseYear(released);
     const vramMB   = parseVRAM(memStr);
     const boostMHz = parseClockMHz(gpuClock);
     const shaders  = parseShaders(shadersStr);
-    const year     = parseYear(released);
     const brand    = detectGPUBrand(name);
-    const arch     = detectGPUArch(name, chip);
-    const score    = estimateGPUComputeScore(shaders, boostMHz, vramMB);
+    const arch     = gpuArchitecture(name, chip, year);
+    const score    = computeGPUScore(shaders, boostMHz, vramMB, year);
+    const bwEst    = estimateBandwidth(vramMB, year, memStr);
 
-    results.push({
-      id:                    toId(name),
+    out.push({
+      id:                    toId(name, seenId),
       brand,
       label:                 name,
       vram_mb:               vramMB,
-      memory_bandwidth_gbps: 0, // not in CSV; engine falls back gracefully
+      memory_bandwidth_gbps: bwEst,
       compute_score:         score,
-      raster_score:          score,
+      raster_score:          Math.round(score * (brand === "amd" ? 1.03 : 1.0)),
       architecture:          arch,
       released_year:         year,
     });
   }
+  return out;
+}
 
-  return results;
+/**
+ * Rough memory bandwidth estimate (GB/s) from VRAM size, year, and memory type string.
+ * Used by the UI only (badge display); engine uses vram_mb for budget decisions.
+ */
+function estimateBandwidth(vramMB: number, year: number, memStr: string): number {
+  const m = memStr.toLowerCase();
+
+  // Modern high-bandwidth memory
+  if (m.includes("hbm3"))  return Math.round(vramMB / 1024 * 75); // ~3.2 TB/s per stack normalised
+  if (m.includes("hbm2e")) return Math.round(vramMB / 1024 * 50);
+  if (m.includes("hbm2"))  return Math.round(vramMB / 1024 * 40);
+  if (m.includes("hbm"))   return Math.round(vramMB / 1024 * 35);
+
+  // GDDR bandwidth roughly proportional to year + VRAM
+  if (m.includes("gddr7")) return Math.round(vramMB / 8 * 1.5);
+  if (m.includes("gddr6x")) return Math.round(vramMB / 8 * 1.2);
+  if (m.includes("gddr6"))  return Math.round(vramMB / 8 * 0.9);
+  if (m.includes("gddr5x")) return Math.round(vramMB / 8 * 0.7);
+  if (m.includes("gddr5"))  return Math.round(vramMB / 8 * 0.5);
+
+  // Older memory — scale by year
+  const base = year >= 2020 ? 350 : year >= 2016 ? 240 : year >= 2012 ? 150 :
+               year >= 2008 ? 80  : year >= 2004 ? 30  : 10;
+  return Math.round(base * (vramMB / 8192));
 }

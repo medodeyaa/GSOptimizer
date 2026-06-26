@@ -164,7 +164,9 @@ function SettingsPanel() {
 
 // ─── Metrics panel ────────────────────────────────────────────────────────────
 
-function MetricsPanel() {
+function MetricsPanel({ animate = true }: { animate?: boolean }) {
+  // When not animating (shared-link refresh), render cards at their final state.
+  const cardInitial = animate ? CARD_HIDDEN : false;
   const gpu        = useSelectedGPU();
   const cpu        = useSelectedCPU();
   const game       = useSelectedGame();
@@ -213,7 +215,7 @@ function MetricsPanel() {
     <div className="flex flex-col gap-4">
 
       {/* ── FPS ─────────────────────────────────────────────────────────── */}
-      <motion.div initial={CARD_HIDDEN} animate={CARD_SHOW} transition={cardTransition(0)}>
+      <motion.div initial={cardInitial} animate={CARD_SHOW} transition={cardTransition(0)}>
         <Card className="p-5">
           <SectionLabel>Estimated FPS</SectionLabel>
           <div className="flex items-end gap-2">
@@ -259,7 +261,7 @@ function MetricsPanel() {
       </motion.div>
 
       {/* ── VRAM ─────────────────────────────────────────────────────────── */}
-      <motion.div initial={CARD_HIDDEN} animate={CARD_SHOW} transition={cardTransition(1)}>
+      <motion.div initial={cardInitial} animate={CARD_SHOW} transition={cardTransition(1)}>
         <Card className="p-5">
           <SectionLabel>VRAM Usage</SectionLabel>
           <div className="flex items-baseline justify-between mb-3">
@@ -279,7 +281,7 @@ function MetricsPanel() {
       </motion.div>
 
       {/* ── Hardware Load ─────────────────────────────────────────────────── */}
-      <motion.div initial={CARD_HIDDEN} animate={CARD_SHOW} transition={cardTransition(2)}>
+      <motion.div initial={cardInitial} animate={CARD_SHOW} transition={cardTransition(2)}>
         <Card className="p-5">
           <SectionLabel>Hardware Load</SectionLabel>
           <div className="flex justify-around items-center gap-4 mt-2">
@@ -290,7 +292,7 @@ function MetricsPanel() {
       </motion.div>
 
       {/* ── Visual Quality ────────────────────────────────────────────────── */}
-      <motion.div initial={CARD_HIDDEN} animate={CARD_SHOW} transition={cardTransition(3)}>
+      <motion.div initial={cardInitial} animate={CARD_SHOW} transition={cardTransition(3)}>
         <Card className="p-5">
           <SectionLabel>Visual Quality Score</SectionLabel>
           <div className="flex items-baseline gap-2 mb-2">
@@ -305,7 +307,7 @@ function MetricsPanel() {
 
       {/* ── Bottleneck ────────────────────────────────────────────────────── */}
       {bottleneck && (
-        <motion.div initial={CARD_HIDDEN} animate={CARD_SHOW} transition={cardTransition(4)}>
+        <motion.div initial={cardInitial} animate={CARD_SHOW} transition={cardTransition(4)}>
           <Card className="p-5">
             <SectionLabel>Bottleneck Analysis</SectionLabel>
             <div className="flex items-center gap-2 mb-2">
@@ -440,9 +442,11 @@ function OptimizerPanel() {
 
 interface ResultsPageProps {
   onBack: () => void;
+  /** Play the staggered card entrance. False on a shared-link refresh. */
+  animateEntrance?: boolean;
 }
 
-export function ResultsPage({ onBack }: ResultsPageProps) {
+export function ResultsPage({ onBack, animateEntrance = true }: ResultsPageProps) {
   const gpu        = useSelectedGPU();
   const cpu        = useSelectedCPU();
   const game       = useSelectedGame();
@@ -541,7 +545,7 @@ export function ResultsPage({ onBack }: ResultsPageProps) {
         {/* Metrics — center */}
         <div className="flex-1 overflow-y-auto gso-scroll p-5 border-r border-surface-800" role="main">
           <h2 className="text-[13px] font-semibold text-[#f5f5f5] mb-4">Performance Metrics</h2>
-          <MetricsPanel />
+          <MetricsPanel animate={animateEntrance} />
         </div>
 
         {/* Optimizer — right */}

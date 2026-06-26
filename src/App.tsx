@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ConfigurePage } from "./pages/ConfigurePage";
 import { ResultsPage }   from "./pages/ResultsPage";
+import { LoadingScreen } from "./components/LoadingScreen";
 import { GPU_CATALOG }   from "./data/hardware/gpu";
 import { CPU_CATALOG }   from "./data/hardware/cpu";
 import { GAME_CATALOG }  from "./data/games/index";
@@ -16,6 +17,11 @@ const VALID_RAM: number[]      = [8, 16, 32, 64];
 
 export default function App() {
   const [view, setView] = useState<View>("configure");
+  // Animate the results cards only when the user navigates here intentionally.
+  // On a shared-link refresh we restore straight into results, so skip the fade.
+  const [animateResults, setAnimateResults] = useState(true);
+  // Boot splash shown while the app mounts and the catalogs are prepared.
+  const [booting, setBooting] = useState(true);
 
   // Restore shared config from URL query params on first load
   useEffect(() => {
@@ -47,12 +53,26 @@ export default function App() {
       }
     }
 
-    if (gpu && cpu && game) setView("results");
+    if (gpu && cpu && game) {
+      setAnimateResults(false); // restored from a shared link → appear instantly, no fade
+      setView("results");
+    }
+  }, []);
+
+  // Dismiss the boot splash once the first frame has painted and the
+  // catalogs are ready. A short minimum keeps it from flashing.
+  useEffect(() => {
+    const t = setTimeout(() => setBooting(false), 900);
+    return () => clearTimeout(t);
   }, []);
 
   return (
-    <div className="flex flex-col h-full bg-surface-900 overflow-hidden">
-      <AnimatePresence mode="wait">
+    <div className="relative flex flex-col h-full bg-surface-900 overflow-hidden">
+      <AnimatePresence>
+        {booting && <LoadingScreen key="boot" />}
+      </AnimatePresence>
+
+      <AnimatePresence mode="wait" initial={false}>
         {view === "configure" ? (
           <motion.div
             key="configure"
@@ -62,7 +82,7 @@ export default function App() {
             exit={{ opacity: 0, x: -12 }}
             transition={{ duration: 0.2, ease: "easeOut" }}
           >
-            <ConfigurePage onAnalyze={() => setView("results")} />
+            <ConfigurePage onAnalyze={() => { setAnimateResults(true); setView("results"); }} />
           </motion.div>
         ) : (
           <motion.div
@@ -73,7 +93,7 @@ export default function App() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.22, ease: "easeOut" }}
           >
-            <ResultsPage onBack={() => setView("configure")} />
+            <ResultsPage onBack={() => setView("configure")} animateEntrance={animateResults} />
           </motion.div>
         )}
       </AnimatePresence>

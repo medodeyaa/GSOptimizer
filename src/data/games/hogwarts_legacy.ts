@@ -20,7 +20,7 @@ export const HOGWARTS_LEGACY: GameDefinition = {
   engine: "Unreal Engine 4",
   base_vram_mb: 2800,
   gpu_baseline_fps: 200,
-  cpu_baseline_fps: 160,
+  cpu_baseline_fps: 135,
   cpu_weight: 0.65,
   resolution_vram_scalars: {
     "1080p": 1.00,

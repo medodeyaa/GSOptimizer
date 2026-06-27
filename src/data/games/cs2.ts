@@ -8,10 +8,11 @@ import type { GameDefinition } from "../types";
  * logic saturate a single CPU core well before the GPU runs out of work.
  * At typical 1080p/1440p competitive settings, mid-range CPUs become the limit.
  *
- * Baseline: compute_score=100 GPU, all-Low, 1080p → ~520 FPS
- * RTX 3060 (score=48): gpu_fps = 0.48 × 520 = 249.6
- * i5-12400F (score≈62): cpu_fps = 0.62 × 350 = 217 → CPU-limited at ~217 FPS
- * With competitive settings (shadows low, textures medium): ~190–200 FPS ✓
+ * Baseline: compute_score=100 GPU, all-Low, 1080p → ~820 FPS (uncapped GPU
+ * ceiling; the top cards are CPU/engine-limited well below this).
+ * cpu_baseline_fps=600 is the realistic single-thread ceiling: a 13900K-class
+ * CPU runs CS2 at ~600 FPS, an i5-12400F-class part at ~430. Recalibrated
+ * against benchmark anchors — the old 520/350 capped the top end far too low.
  *
  * VRAM is very modest — Source 2 asset streaming is efficient.
  */
@@ -20,8 +21,8 @@ export const CS2: GameDefinition = {
   label: "Counter-Strike 2",
   engine: "Source 2",
   base_vram_mb: 700,
-  gpu_baseline_fps: 520,
-  cpu_baseline_fps: 350,
+  gpu_baseline_fps: 820,
+  cpu_baseline_fps: 600,
   cpu_weight: 0.60,
   resolution_vram_scalars: {
     "1080p": 1.00,

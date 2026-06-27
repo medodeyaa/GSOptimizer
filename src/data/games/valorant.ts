@@ -12,16 +12,17 @@ import type { GameDefinition } from "../types";
  * Tiers are modelled with four steps for a uniform UI even where the in-game
  * control is coarser — intermediate steps interpolate intensity.
  *
- * Baseline: compute_score=100 GPU, all-Medium, 1080p → ~700 FPS (GPU ceiling)
- * cpu_baseline_fps=600 makes the CPU the realistic limiter at high refresh.
+ * Baseline: compute_score=100 GPU, all-Low, 1080p → ~870 FPS (GPU ceiling).
+ * cpu_baseline_fps=700 is the CPU/engine limit at high refresh (a 13900K-class
+ * CPU pushes ~700 FPS). Recalibrated against benchmark anchors.
  */
 export const VALORANT: GameDefinition = {
   id: "valorant",
   label: "VALORANT",
   engine: "Unreal Engine 4",
   base_vram_mb: 600,
-  gpu_baseline_fps: 700,
-  cpu_baseline_fps: 600,
+  gpu_baseline_fps: 870,
+  cpu_baseline_fps: 700,
   cpu_weight: 0.70,
   resolution_vram_scalars: {
     "1080p": 1.00,

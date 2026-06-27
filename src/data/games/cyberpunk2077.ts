@@ -18,7 +18,7 @@ export const CYBERPUNK_2077: GameDefinition = {
   engine: "REDengine 4",
   base_vram_mb: 4200,
   gpu_baseline_fps: 240,
-  cpu_baseline_fps: 200,
+  cpu_baseline_fps: 220,
   cpu_weight: 0.35,
   resolution_vram_scalars: {
     "1080p": 1.00,

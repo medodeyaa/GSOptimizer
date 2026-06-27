@@ -12,16 +12,18 @@ import type { GameDefinition } from "../types";
  * This model represents the DX12 path. Lumen and Nanite scale aggressively
  * with resolution, so the resolution_vram_scalars are steeper than CS2.
  *
- * Baseline: compute_score=100 GPU, all-Medium, 1080p → ~240 FPS
- * cpu_baseline_fps high (320) reflects competitive Performance-Mode headroom.
+ * Baseline: compute_score=100 GPU, all-Low, 1080p → ~380 FPS (DX12 GPU ceiling).
+ * cpu_baseline_fps=250 is the DX12 CPU limit; the GPU is the usual bottleneck
+ * here (Lumen/Nanite are GPU-heavy). Recalibrated against benchmark anchors —
+ * the old 240/320 under-shot the GPU ceiling and over-shot the CPU one.
  */
 export const FORTNITE: GameDefinition = {
   id: "fortnite",
   label: "Fortnite",
   engine: "Unreal Engine 5",
   base_vram_mb: 1800,
-  gpu_baseline_fps: 240,
-  cpu_baseline_fps: 320,
+  gpu_baseline_fps: 380,
+  cpu_baseline_fps: 250,
   cpu_weight: 0.55,
   resolution_vram_scalars: {
     "1080p": 1.00,

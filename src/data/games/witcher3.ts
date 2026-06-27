@@ -19,7 +19,7 @@ export const WITCHER_3: GameDefinition = {
   engine: "REDengine 3 (Next Gen)",
   base_vram_mb: 1900,
   gpu_baseline_fps: 310,
-  cpu_baseline_fps: 250,
+  cpu_baseline_fps: 220,
   cpu_weight: 0.48,
   resolution_vram_scalars: {
     "1080p": 1.00,

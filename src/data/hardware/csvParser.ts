@@ -139,9 +139,32 @@ function parseClockMHz(s: string): number {
 }
 
 /** Parse year from date strings like "Jun 22nd, 2000", "1992", "Never Released". */
-function parseYear(s: string): number {
+function parseYear(s: string, name?: string, chip?: string): number {
   const m = s.match(/\b(19|20)\d{2}\b/);
-  return m ? parseInt(m[0], 10) : 2000;
+  if (m) return parseInt(m[0], 10);
+  
+  if (name) {
+    const n = (name + " " + (chip || "")).toLowerCase();
+    if (/rtx 50|blackwell|gb\d/.test(n)) return 2025;
+    if (/rtx 40|ada|ad\d/.test(n)) return 2023;
+    if (/rtx 30|ampere|ga\d/.test(n)) return 2021;
+    if (/rtx 20|gtx 16|turing|tu\d/.test(n)) return 2019;
+    if (/gtx 10|pascal|gp\d/.test(n)) return 2016;
+    if (/gtx 9|maxwell|gm\d/.test(n)) return 2014;
+    if (/gtx [67]|kepler|gk\d/.test(n)) return 2012;
+    if (/gtx [45]|fermi|gf\d/.test(n)) return 2010;
+    
+    if (/rx 7\d00|rdna ?3|navi 3/.test(n)) return 2023;
+    if (/rx 6\d00|rdna ?2|navi 2/.test(n)) return 2021;
+    if (/rx 5\d00|rdna ?1|navi 1/.test(n)) return 2019;
+    if (/vega/.test(n)) return 2017;
+    if (/rx 5\d0|rx 4\d0|polaris/.test(n)) return 2016;
+    
+    if (/arc b|battlemage/.test(n)) return 2024;
+    if (/arc a|alchemist/.test(n)) return 2022;
+  }
+  
+  return 2010; // Safer generic fallback than 2000
 }
 
 /**
@@ -493,7 +516,7 @@ export function parseGPUsFromCSV(): GPU[] {
     const gpuClock   = f[6]?.trim() ?? "0";
     const shadersStr = f[8]?.trim() ?? "0";
 
-    const year     = parseYear(released);
+    const year     = parseYear(released, name, chip);
     const vramMB   = parseVRAM(memStr);
     const boostMHz = parseClockMHz(gpuClock);
     const shaders  = parseShaders(shadersStr);
